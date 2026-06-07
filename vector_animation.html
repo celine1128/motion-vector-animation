@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>矢量动画角色（基于姿态数据）</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e2a3a;
+            color: #ecf0f1;
+            text-align: center;
+            margin: 0;
+            padding: 20px;
+        }
+        h2 { color: #f1c40f; }
+        .controls {
+            margin: 20px auto;
+            padding: 15px;
+            background: #2c3e50;
+            border-radius: 12px;
+            display: inline-block;
+            text-align: left;
+        }
+        .control-row { margin-bottom: 10px; }
+        #canvas-container {
+            margin: 20px auto;
+            width: 640px;
+            height: 480px;
+            background-color: #000;
+            border-radius: 16px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.5);
+            position: relative;
+            overflow: hidden;
+        }
+        #source-video {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            width: 160px;
+            height: 120px;
+            border: 2px solid #f1c40f;
+            border-radius: 8px;
+            z-index: 10;
+            background: #000;
+            object-fit: cover;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #111;
+            z-index: 5;
+        }
+        button {
+            padding: 8px 20px;
+            background-color: #e67e22;
+            color: white;
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        button:hover { background-color: #d35400; }
+        button:disabled { background-color: #7f8c8d; }
+        #status { font-size: 13px; margin-left: 15px; color: #bdc3c7; }
+    </style>
+</head>
+<body>
+    <h2>🎨 矢量动画角色 (基于姿态数据)</h2>
+    <div class="controls">
+        <div class="control-row">
+            <label>📁 1. 加载动作数据 (JSON) : </label>
+            <input type="file" id="jsonUpload" accept=".json">
+        </div>
+        <div class="control-row">
+            <label>🎥 2. 加载原视频 (MP4) : </label>
+            <input type="file" id="videoUpload" accept="video/*">
+        </div>
+        <div class="control-row">
+            <button id="playBtn" disabled>▶ 播放动画</button>
+            <span id="status">等待加载 JSON 和视频...</span>
+        </div>
+    </div>
+    <div id="canvas-container">
+        <video id="source-video" muted playsinline></video>
+        <canvas id="poseCanvas" width="640" height="480"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('poseCanvas');
+        const ctx = canvas.getContext('2d');
+        const video = document.getElementById('source-video');
+        const playBtn = document.getElementById('playBtn');
+        const jsonUpload = document.getElementById('jsonUpload');
+        const videoUpload = document.getElementById('videoUpload');
+        const statusText = document.getElementById('status');
+
+        let motionData = [];
+        let animationId = null;
+        let isPlaying = false;
+        let hasJson = false, hasVideo = false;
+
+        const ESTIMATED_FPS = 30;
+        const W = 640, H = 480;
+
+        // 定义肢体连接关系（用于计算长度和角度）
+        // 格式: [起点索引, 终点索引, 肢体类型, 宽度]
+        const LIMBS = [
+            { name: "左上臂", from: 11, to: 13, width: 12, color: "#ff9933" },
+            { name: "左前臂", from: 13, to: 15, width: 10, color: "#ffaa55" },
+            { name: "右上臂", from: 12, to: 14, width: 12, color: "#ff9933" },
+            { name: "右前臂", from: 14, to: 16, width: 10, color: "#ffaa55" },
+            { name: "左大腿", from: 23, to: 25, width: 14, color: "#33aaff" },
+            { name: "左小腿", from: 25, to: 27, width: 12, color: "#55ccff" },
+            { name: "右大腿", from: 24, to: 26, width: 14, color: "#33aaff" },
+            { name: "右小腿", from: 26, to: 28, width: 12, color: "#55ccff" },
+            { name: "躯干上", from: 11, to: 23, width: 18, color: "#66cc66" },
+            { name: "躯干下", from: 12, to: 24, width: 18, color: "#66cc66" },
+            { name: "脖子到肩中", from: 11, to: 12, width: 14, color: "#88dd88" }
+        ];
+
+        // 辅助函数：计算两点距离
+        function distance(p1, p2) {
+            const dx = p1.x - p2.x, dy = p1.y - p2.y;
+            return Math.hypot(dx, dy);
+        }
+
+        // 辅助函数：计算从 p1 指向 p2 的角度（弧度）
+        function angle(p1, p2) {
+            return Math.atan2(p2.y - p1.y, p2.x - p1.x);
+        }
+
+        // 绘制圆角矩形（带旋转）
+        function roundedRect(ctx, x, y, w, h, r, angleRad) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angleRad);
+            ctx.beginPath();
+            ctx.moveTo(r, 0);
+            ctx.lineTo(w - r, 0);
+            ctx.quadraticCurveTo(w, 0, w, r);
+            ctx.lineTo(w, h - r);
+            ctx.quadraticCurveTo(w, h, w - r, h);
+            ctx.lineTo(r, h);
+            ctx.quadraticCurveTo(0, h, 0, h - r);
+            ctx.lineTo(0, r);
+            ctx.quadraticCurveTo(0, 0, r, 0);
+            ctx.closePath();
+            ctx.restore();
+            // 填充之前再应用一次变换（上面 restore 了，这里需要重新应用）
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angleRad);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // 旋转填充矩形（简化版）
+        function fillRotatedRect(ctx, x, y, w, h, angleRad, color) {
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(angleRad);
+            ctx.fillStyle = color;
+            ctx.fillRect(-w/2, -h/2, w, h);
+            ctx.restore();
+        }
+
+        // 主要绘制函数：绘制一个完整的卡通矢量角色
+        function drawVectorCharacter(keypoints) {
+            if (!keypoints) return;
+            ctx.clearRect(0, 0, W, H);
+            
+            // 1. 绘制头部 (鼻子索引0 或 眼睛索引1)
+            const headCenter = keypoints[0];   // 鼻子
+            if (headCenter && headCenter.visibility > 0.5) {
+                const x = headCenter.x * W, y = headCenter.y * H;
+                // 头部圆形 + 五官
+                ctx.beginPath();
+                ctx.arc(x, y, 20, 0, Math.PI*2);
+                ctx.fillStyle = "#ffccaa";
+                ctx.fill();
+                ctx.strokeStyle = "#aa8866";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                // 眼睛
+                const leftEye = keypoints[1];  // 左眼
+                const rightEye = keypoints[2]; // 右眼
+                if (leftEye && leftEye.visibility > 0.5) {
+                    ctx.beginPath();
+                    ctx.arc(leftEye.x * W, leftEye.y * H, 4, 0, Math.PI*2);
+                    ctx.fillStyle = "#fff";
+                    ctx.fill();
+                    ctx.fillStyle = "#000";
+                    ctx.arc(leftEye.x * W, leftEye.y * H, 2, 0, Math.PI*2);
+                    ctx.fill();
+                }
+                if (rightEye && rightEye.visibility > 0.5) {
+                    ctx.beginPath();
+                    ctx.arc(rightEye.x * W, rightEye.y * H, 4, 0, Math.PI*2);
+                    ctx.fillStyle = "#fff";
+                    ctx.fill();
+                    ctx.fillStyle = "#000";
+                    ctx.arc(rightEye.x * W, rightEye.y * H, 2, 0, Math.PI*2);
+                    ctx.fill();
+                }
+                // 微笑
+                ctx.beginPath();
+                ctx.arc(x, y+5, 12, 0.1, Math.PI - 0.1);
+                ctx.strokeStyle = "#aa6644";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+
+            // 2. 绘制四肢和躯干（圆角矩形，带旋转）
+            for (let limb of LIMBS) {
+                const p1 = keypoints[limb.from];
+                const p2 = keypoints[limb.to];
+                if (!p1 || !p2) continue;
+                if (p1.visibility < 0.5 || p2.visibility < 0.5) continue;
+                
+                const x1 = p1.x * W, y1 = p1.y * H;
+                const x2 = p2.x * W, y2 = p2.y * H;
+                const len = Math.hypot(x2 - x1, y2 - y1);
+                if (len < 1) continue;
+                const ang = Math.atan2(y2 - y1, x2 - x1);
+                const cx = (x1 + x2) / 2;
+                const cy = (y1 + y2) / 2;
+                const w = len;
+                const h = limb.width;
+                // 绘制带圆角的矩形（模拟骨骼肉感）
+                ctx.save();
+                ctx.translate(cx, cy);
+                ctx.rotate(ang);
+                ctx.beginPath();
+                const radius = h/2;
+                ctx.moveTo(-w/2 + radius, -h/2);
+                ctx.lineTo(w/2 - radius, -h/2);
+                ctx.quadraticCurveTo(w/2, -h/2, w/2, -h/2 + radius);
+                ctx.lineTo(w/2, h/2 - radius);
+                ctx.quadraticCurveTo(w/2, h/2, w/2 - radius, h/2);
+                ctx.lineTo(-w/2 + radius, h/2);
+                ctx.quadraticCurveTo(-w/2, h/2, -w/2, h/2 - radius);
+                ctx.lineTo(-w/2, -h/2 + radius);
+                ctx.quadraticCurveTo(-w/2, -h/2, -w/2 + radius, -h/2);
+                ctx.closePath();
+                ctx.fillStyle = limb.color;
+                ctx.fill();
+                ctx.strokeStyle = "#ffffff66";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.restore();
+            }
+
+            // 3. 可选：绘制关节点（小高光）
+            for (let i=0; i<keypoints.length; i++) {
+                const p = keypoints[i];
+                if (p && p.visibility > 0.5) {
+                    ctx.beginPath();
+                    ctx.arc(p.x * W, p.y * H, 4, 0, 2*Math.PI);
+                    ctx.fillStyle = "#ffff99";
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                }
+            }
+        }
+
+        // 从 JSON 数据中提取当前帧的关键点，并绘制
+        function drawFrame(frameIndex) {
+            if (!motionData.length || !motionData[frameIndex]) return;
+            const keypoints = motionData[frameIndex].keypoints;
+            drawVectorCharacter(keypoints);
+            statusText.textContent = `🎬 播放进度: ${video.currentTime.toFixed(2)}s | 姿态帧: ${frameIndex}`;
+        }
+
+        // 动画循环：与视频时间同步
+        function animate() {
+            if (!isPlaying) return;
+            let targetFrame = Math.floor(video.currentTime * ESTIMATED_FPS);
+            if (targetFrame >= motionData.length) targetFrame = motionData.length - 1;
+            drawFrame(targetFrame);
+            animationId = requestAnimationFrame(animate);
+        }
+
+        // 加载 JSON
+        jsonUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                try {
+                    motionData = JSON.parse(ev.target.result);
+                    hasJson = true;
+                    statusText.textContent = "✅ JSON 加载成功";
+                    checkReady();
+                } catch(err) {
+                    statusText.textContent = "❌ JSON 解析失败";
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        // 加载视频
+        videoUpload.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const url = URL.createObjectURL(file);
+            video.src = url;
+            hasVideo = true;
+            statusText.textContent = "✅ 视频加载成功";
+            checkReady();
+        });
+
+        function checkReady() {
+            if (hasJson && hasVideo) {
+                playBtn.disabled = false;
+                statusText.textContent = "🎉 所有数据就绪，点击播放！";
+            }
+        }
+
+        playBtn.addEventListener('click', () => {
+            if (isPlaying) {
+                video.pause();
+                cancelAnimationFrame(animationId);
+                playBtn.textContent = "▶ 继续";
+                isPlaying = false;
+            } else {
+                video.play();
+                playBtn.textContent = "⏸ 暂停";
+                isPlaying = true;
+                animate();
+            }
+        });
+
+        video.addEventListener('ended', () => {
+            isPlaying = false;
+            cancelAnimationFrame(animationId);
+            playBtn.textContent = "🔄 重新播放";
+        });
+    </script>
+</body>
+</html>

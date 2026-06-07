@@ -1,0 +1,12 @@
+我负责动画生成模块。本模块使用 HTML5 和 JavaScript 实现，通过读取组员二生成的 motion_data.json，将标准化后的坐标映射到网页坐标系，并使用 SVG 的 line 和 circle 元素进行 DOM 重绘，从而实现人体骨架的矢量动画播放。
+
+为了保证项目在不同环境下（无本地服务器的静态双击打开）都能顺利展示，我引入了文件上传机制来读取 JSON 数据，避免了 Fetch API 的本地跨域 (CORS) 限制。
+
+我已完成：
+1. vector_animation.html 编写；
+2. 实现了 MediaPipe 33个身体关键点的拓扑连线映射；
+3. 实现了基于 requestAnimationFrame 的 SVG 连续重绘机制；
+4. 针对提供的 motion_data.json 完成了流畅度与可视化的完整测试。
+
+交付文件：
+- vector_animation.html
